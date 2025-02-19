@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Adding notebook to prevent pushing sensitive data
+*.ipynb
+
 # C extensions
 *.so
 
