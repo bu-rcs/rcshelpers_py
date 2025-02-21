@@ -3,6 +3,9 @@
 from io import StringIO
 import pandas as pd
 import subprocess
+import os
+from tqdm import tqdm
+import argparse
 
 def read_gpu_records(filepath):
     """Filters only rows containing 'gpus=' using grep and loads them into a DataFrame."""
@@ -68,29 +71,79 @@ def clean_gpu_data(filepath):
 
     return cleaned_data
 
-# Example usage
-gpu_records_2402 = clean_gpu_data("/project/scv/dugan/gpustats/data/scc-201/2402")
-# for record in gpu_records_2402[:50000]:  # Print first 5 cleaned records
-#     print(record)
+# Inputs
+parser = argparse.ArgumentParser()
+parser.add_argument("-y", "--year", default="24", type=str, help="Year <2Y>")
+parser.add_argument("-m", "--month", default="01", type=str, help="Month <MM>")
+args = parser.parse_args()
 
-gpu_records_2402 = pd.DataFrame(gpu_records_2402)
+year = args.year # "25"
+month = args.month # "01"
 
-gpu_records_2402_scenario = gpu_records_2402.loc[gpu_records_2402['scenario'] != 0]
+# Fetch accounting info for the year
+gpu_jobs = read_gpu_records(f"/projectnb/rcsmetrics/accounting/data/scc/20{year}.csv")
+gpu_jobs['task_string'] = gpu_jobs['task_number'].astype(str)
+gpu_jobs.loc[~(gpu_jobs['options'].str.contains('-t')), 'task_string'] = "undefined"
+gpu_jobs['job_task'] = gpu_jobs['job_number'].astype(str) + '.' + gpu_jobs['task_string'].astype(str)
 
+# Fetch node names from directory
+nodes = os.listdir("/project/scv/dugan/gpustats/data/")
+files = []
 
-# gpu_jobs_2024.fillna('-', inplace=True)
-gpu_jobs_2024['task_string'] = gpu_jobs_2024['task_number'].astype(str)
-gpu_jobs_2024.loc[~(gpu_jobs_2024['options'].str.contains('-t')), 'task_string'] = "undefined"
-gpu_jobs_2024['job_task'] = gpu_jobs_2024['job_number'].astype(str) + '.' + gpu_jobs_2024['task_string'].astype(str)
+# Collect file paths
+for node in nodes:
+    for date in os.listdir(f"/project/scv/dugan/gpustats/data/{node}"):
+        if date == year + month:
+            files.append(f"/project/scv/dugan/gpustats/data/{node}/{date}")
 
-# useful_columns = ['qname', 'hostname', 'owner', 'job_name', 'job_number', '']
-merged_df = pd.merge(gpu_records_2402_scenario, gpu_jobs_2024, left_on='job_id', right_on='job_task', how='left')
+# Store merged dataframes
+all_merged_dfs = []
 
+# Process each file
+for file_name in tqdm(files, desc="Parsing files"):
+    try:
+        gpu_records = pd.DataFrame(clean_gpu_data(file_name))
+    except Exception as e:
+        print(f"Skipping missing or corrupted file: {file_name}")
+        continue
+    
+    gpu_records_scenario = gpu_records.loc[gpu_records['scenario'] != 0]
+    merged_df = pd.merge(gpu_records_scenario, gpu_jobs, left_on='job_id', right_on='job_task', how='left')
+    
+    # Append to list
+    all_merged_dfs.append(merged_df)
 
-owner_stats = merged_df.groupby('owner').agg(
+# Concatenate all dataframes into one big dataframe
+final_df = pd.concat(all_merged_dfs, ignore_index=True)
+
+# Aggregate statistics by 'owner'
+owner_stats = final_df.groupby('owner').agg(
     mean_utilization=('util', 'mean'),
-    count=('util', 'count')
+    count=('util', 'count'),
+    zero_util_count=('util', lambda x: (x == 0).sum()),
+    zero_util_ratio=('util', lambda x: (x == 0).mean())
 ).reset_index()
-owner_stats['lb'] = (1-(owner_stats['mean_utilization']/100)) * owner_stats['count']
 
-print(owner_stats.sort_values(by='lb', ascending=False).head(10))
+# Compute 'Wasted GPU Hours' metric
+owner_stats['Wasted GPU Hours'] = (1 - (owner_stats['mean_utilization'] / 100)) * owner_stats['count'] / 12
+owner_stats['Fully Wasted GPU Hours'] = owner_stats['zero_util_ratio'] * owner_stats['count'] / 12
+
+# # Sort by 'Wasted GPU Hours' in descending order
+# owner_stats = owner_stats.sort_values(by='Wasted GPU Hours', ascending=False)
+
+# # Output final dataframe
+# print(owner_stats)
+print('Top Users')
+print(owner_stats.sort_values(by='Wasted GPU Hours', ascending=False).head(15))
+
+print('\n\nTop qname')
+qname = final_df.groupby('qname').agg(
+    mean_utilization=('util', 'mean'),
+    count=('util', 'count'),
+    zero_util_count=('util', lambda x: (x == 0).sum()),
+    zero_util_ratio=('util', lambda x: (x == 0).mean())
+).reset_index()
+
+qname['Wasted GPU Hours'] = (1 - (qname['mean_utilization'] / 100)) * qname['count'] / 12
+qname['Fully Wasted GPU Hours'] = qname['zero_util_ratio'] * qname['count'] / 12
+print(qname.sort_values(by='Wasted GPU Hours', ascending=False).head(15))
