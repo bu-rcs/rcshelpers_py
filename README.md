@@ -18,4 +18,5 @@ mamba activate myenv
 
 python lbdemo.py
 ```
-Can also explore notebook to explore other possibilities and further analysis.
+Can also explore notebook to explore other possibilities and further analysis.  
+More breakdowns on ood jobs, etc. within nodebook
